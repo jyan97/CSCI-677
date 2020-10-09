@@ -190,6 +190,25 @@ class SFMSolver(object):
         """
         # TODO: step 1 and 2
         # ...
+        sift = cv2.xfeatures2d.SIFT_create()
+        kp1, feature1 = sift.detectAndCompute(img1, None)
+        kp2, feature2 = sift.detectAndCompute(img2, None)
+
+        FLANN_INDEX_KDTREE = 0
+        k = 2 # As recommended
+        indexParams = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        searchParams = dict(checks=50)
+
+        Flann = cv2.FlannBasedMatcher(indexParams, searchParams)
+        sift_matches = Flann.knnMatch(feature1, feature2, k)
+
+        p1, p2, matches_good = list(), list(), list()
+        for m,n in sift_matches:
+            if m.distance < 0.7 * n.distance:
+                p1.append(kp1[m.queryIdx].pt)
+                p2.append(kp2[m.trainIdx].pt)
+                matches_good.append(m)
+
         return p1, p2, matches_good, kp1, kp2
 
     def compute_essential(self, p1, p2):
@@ -205,6 +224,7 @@ class SFMSolver(object):
         """
         # TODO: step 3
         # ...
+        E, mask = cv2.findEssentialMat(p1, p2, method=cv2.RANSAC, prob=0.999, threshold=1.0)
         return E, mask
 
     def compute_pose(self, p1, p2, E):
@@ -220,6 +240,8 @@ class SFMSolver(object):
 
         # TODO: step 4
         # ...
+
+        points, R, trans, mask = cv2.recoverPose(E, p1, p2)
         return R, trans
 
     def triangulate(self, p1, p2, R, trans, mask):
@@ -236,6 +258,15 @@ class SFMSolver(object):
         """
         # TODO: step 5
         # ...
+        mat_1 = np.hstack((np.eye(3, 3), np.zeros((3, 1))))
+        mat_2 = np.hstack((R, trans))
+        proj_1 = np.dot(self.intrinsic, mat_1)
+        proj_2 = np.dot(self.intrinsic, mat_2)
+
+        point4d = cv2.triangulatePoints(proj_1, proj_2, p1, p2)
+        print(point4d.shape)
+        point4d_non_hom = point4d / np.tile(point4d[-1, :], (4, 1))
+        point_3d = point4d_non_hom[:3, :].T
         return point_3d
 
     def run(self):
@@ -252,6 +283,9 @@ class SFMSolver(object):
             self.imgs[0], self.imgs[1], kp1, kp2, matches_good,
             save_path=join(self.output_dir, 'sift_match.png'))
 
+        p1 = np.float32(p1).reshape(-1, 1, 2)
+        p2 = np.float32(p2).reshape(-1, 1, 2)
+
         # step 3: compute essential matrix
         E, mask = self.compute_essential(p1, p2)
 
@@ -265,6 +299,13 @@ class SFMSolver(object):
 
         # step 4: recover pose
         R, trans = self.compute_pose(p1, p2, E)
+
+
+        '''
+        undistortion 
+        '''
+        p1 = cv2.undistortPoints(p1, self.intrinsic, distCoeffs=None)
+        p2 = cv2.undistortPoints(p2, self.intrinsic, distCoeffs=None)
 
         # step 5: triangulation
         point_3d = self.triangulate(p1, p2, R, trans, mask)
