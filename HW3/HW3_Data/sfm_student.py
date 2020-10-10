@@ -1,7 +1,6 @@
 '''
 CS 677 Fall 2019 - HW 3
 SIFT Matching and SFM
-
 note:
 Since SIFT is patented, you might need to choose (reinstall) appropriate opencv version:
 Try (in your virtual env):
@@ -173,43 +172,47 @@ class SFMSolver(object):
         img1, img2: are input images
         The following outputs are needed:
         kp1, kp2: keypoints (here sift keypoints) of the two images
-        matches_good: matches which pass the ratio test
+        good: matches which pass the ratio test
         p1, p2: only the 2d points in the respective images
         pass ratio test. These points should correspond to each other.
-
         Steps:
         1. Compute sift descriptors.
         2. Match sift across two images.
         3. Use ratio test to get good matches.
         4. Store points retrieved from the good matches.
-
         Hints: See SIFT_create
         For feature matching you could use
         - FLANN Matcher:
         (https://docs.opencv.org/3.4/dc/de2/classcv_1_1FlannBasedMatcher.html)
         """
-        # TODO: step 1 and 2
-        # ...
+
+        # Initialize SIFT object and compute local features
         sift = cv2.xfeatures2d.SIFT_create()
         kp1, feature1 = sift.detectAndCompute(img1, None)
         kp2, feature2 = sift.detectAndCompute(img2, None)
 
+        # Match between two image using FLANN
         FLANN_INDEX_KDTREE = 0
-        k = 2 # As recommended
-        indexParams = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-        searchParams = dict(checks=50)
+        k = 2  # As recommended
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        flann_matcher = cv2.FlannBasedMatcher(index_params, search_params)
+        matches = flann_matcher.knnMatch(feature1, feature2, k)
+        print(len(matches))
 
-        Flann = cv2.FlannBasedMatcher(indexParams, searchParams)
-        sift_matches = Flann.knnMatch(feature1, feature2, k)
-
-        p1, p2, matches_good = list(), list(), list()
-        for m,n in sift_matches:
+        # Conduct ratio test to get all the good matches. 0.7 is an empirical parameter.
+        # Record the cooresponding coordinates for good matches in coord1 and coord2
+        good, coord1, coord2 = list(), list(), list()
+        for m, n in matches:
             if m.distance < 0.7 * n.distance:
-                p1.append(kp1[m.queryIdx].pt)
-                p2.append(kp2[m.trainIdx].pt)
-                matches_good.append(m)
+                good.append(m)
+                coord1.append(kp1[m.queryIdx].pt)
+                coord2.append(kp2[m.trainIdx].pt)
+        print(len(coord1))
+        p1 = np.expand_dims(np.float32(coord1), axis=1)
+        p2 = np.expand_dims(np.float32(coord2), axis=1)
 
-        return p1, p2, matches_good, kp1, kp2
+        return p1, p2, good, kp1, kp2
 
     def compute_essential(self, p1, p2):
         """
@@ -219,12 +222,12 @@ class SFMSolver(object):
         Essential Matrix (E), and corresponding (mask)
         used in its computation. The mask contains the inlier_matches
         to compute E
-
         Hint: findEssentialMat
         """
-        # TODO: step 3
-        # ...
-        E, mask = cv2.findEssentialMat(p1, p2, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+
+        E, mask = cv2.findEssentialMat(p1, p2, self.intrinsic, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+        # print(mask.shape)
+        # print(type(mask))
         return E, mask
 
     def compute_pose(self, p1, p2, E):
@@ -234,14 +237,13 @@ class SFMSolver(object):
         E: Essential matrix
         Outputs:
         R, trans: Rotation, Translation vectors
-
         Hint: recoverPose
         """
 
-        # TODO: step 4
-        # ...
+        _, R, trans, _ = cv2.recoverPose(E, p1, p2, self.intrinsic)
+        print("Rotation Matrix: \n", R)
+        print("Translation Matrix: \n", trans)
 
-        points, R, trans, mask = cv2.recoverPose(E, p1, p2)
         return R, trans
 
     def triangulate(self, p1, p2, R, trans, mask):
@@ -249,24 +251,32 @@ class SFMSolver(object):
         p1,p2: Points in the two images which correspond to each other
         R, trans: Rotation and translation matrix.
         mask: is obtained during computation of Essential matrix
-
         Outputs:
         point_3d: should be of shape (NumPoints, 3). The last dimension
         refers to (x,y,z) co-ordinates
-
         Hint: triangulatePoints
         """
-        # TODO: step 5
-        # ...
-        mat_1 = np.hstack((np.eye(3, 3), np.zeros((3, 1))))
-        mat_2 = np.hstack((R, trans))
-        proj_1 = np.dot(self.intrinsic, mat_1)
-        proj_2 = np.dot(self.intrinsic, mat_2)
 
-        point4d = cv2.triangulatePoints(proj_1, proj_2, p1, p2)
-        print(point4d.shape)
-        point4d_non_hom = point4d / np.tile(point4d[-1, :], (4, 1))
-        point_3d = point4d_non_hom[:3, :].T
+        # Since the dimension of mask is (xxxx * 1), we will flatten it and further mask it on the good points
+        # Remove the outliers and retain the inliers
+        p1 = p1[mask.flatten() == 1, :, :]
+        p2 = p2[mask.flatten() == 1, :, :]
+        print(p1.shape)
+        # Normalization before triangulation
+        p1_n = cv2.undistortPoints(p1, self.intrinsic, None)
+        p2_n = cv2.undistortPoints(p2, self.intrinsic, None)
+
+        M_1 = np.hstack((np.eye(3, 3), np.zeros((3, 1))))
+        print(" Projection matrix 1 \n", M_1)
+        M_2 = np.hstack((R, trans))
+        print(" Projection matrix 2 \n", M_2)
+
+        # Triangulation
+        homo_coord = cv2.triangulatePoints(M_1, M_2, p1_n, p2_n)
+
+        # Convert to 3d point
+        # The shape of homo_cord is (4, xxxx)
+        point_3d = (homo_coord[:3, :] / homo_coord[3, :]).T
         return point_3d
 
     def run(self):
@@ -275,42 +285,35 @@ class SFMSolver(object):
 
         # pair processing
 
-        # step 1 and 2: detect and match feature
-        p1, p2, matches_good, kp1, kp2 = self.detect_and_match_feature(
-            self.imgs[0], self.imgs[1])
+        #  For each pair of images
+        for i,j in [[0,1]]:
+        # for i, j in [[0, 1]]:
+            # step 1 and 2: detect and match feature
+            p1, p2, matches_good, kp1, kp2 = self.detect_and_match_feature(
+                self.imgs[i], self.imgs[j])
 
-        self.visualize_matches(
-            self.imgs[0], self.imgs[1], kp1, kp2, matches_good,
-            save_path=join(self.output_dir, 'sift_match.png'))
+            self.visualize_matches(
+                self.imgs[i], self.imgs[j], kp1, kp2, matches_good,
+                save_path=join(self.output_dir, str(i)+str(j)+'sift_match.png'))
 
-        p1 = np.float32(p1).reshape(-1, 1, 2)
-        p2 = np.float32(p2).reshape(-1, 1, 2)
+            # step 3: compute essential matrix
+            E, mask = self.compute_essential(p1, p2)
 
-        # step 3: compute essential matrix
-        E, mask = self.compute_essential(p1, p2)
+            self.visualize_matches(
+                self.imgs[i], self.imgs[j], kp1, kp2, matches_good, mask=mask,
+                save_path=join(self.output_dir, str(i)+str(j)+'inlier_match.png'))
 
-        self.visualize_matches(
-            self.imgs[0], self.imgs[1], kp1, kp2, matches_good, mask=mask,
-            save_path=join(self.output_dir, 'inlier_match.png'))
+            self.visualize_epipolar_lines(
+                self.imgs[i], self.imgs[j], p1, p2, E,
+                save_path=join(self.output_dir, str(i)+str(j)+'epipolar_lines.png'))
 
-        self.visualize_epipolar_lines(
-            self.imgs[0], self.imgs[1], p1, p2, E,
-            save_path=join(self.output_dir, 'epipolar_lines.png'))
+            # step 4: recover pose
+            R, trans = self.compute_pose(p1, p2, E)
 
-        # step 4: recover pose
-        R, trans = self.compute_pose(p1, p2, E)
-
-
-        '''
-        undistortion 
-        '''
-        p1 = cv2.undistortPoints(p1, self.intrinsic, distCoeffs=None)
-        p2 = cv2.undistortPoints(p2, self.intrinsic, distCoeffs=None)
-
-        # step 5: triangulation
-        point_3d = self.triangulate(p1, p2, R, trans, mask)
-        self.write_simple_obj(point_3d, None, filepath=join(
-            self.output_dir, 'output.obj'))
+            # step 5: triangulation
+            point_3d = self.triangulate(p1, p2, R, trans, mask)
+            self.write_simple_obj(point_3d, None, filepath=join(
+                self.output_dir, str(i)+str(j)+'output.obj'))
 
         # (optional, not scored) we can process all image pairs
         # ...
